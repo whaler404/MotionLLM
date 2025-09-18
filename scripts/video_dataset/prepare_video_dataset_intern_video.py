@@ -42,6 +42,8 @@ def prepare(
 
     with open(file_path, "r") as file:
         data = json.load(file)
+    # Materialize the json iterator into a list so that shuffling or length
+    # queries behave the same across different python versions.
     data_set = list(data)
 
     print(f"{split} set has {len(data_set):,} samples")
@@ -81,6 +83,8 @@ def prepare_sample(example: dict, tokenizer: Tokenizer, max_length: int, mask_in
     # full_prompt = generate_prompt(example)
     # import pdb; pdb.set_trace()
     full_prompt = generate_prompt_mlp(example)
+    # Concatenate the golden answer so that the tokenizer observes a complete
+    # dialogue turn when constructing the training labels.
     full_prompt_and_response = full_prompt + example['output']
     # import pdb; pdb.set_trace()
     encoded_full_prompt = tokenize(tokenizer, full_prompt, max_length=max_length, eos=False)
@@ -98,6 +102,8 @@ def prepare_sample(example: dict, tokenizer: Tokenizer, max_length: int, mask_in
     # The labels are the full prompt with response, but with the prompt masked out
     labels = encoded_full_prompt_and_response.clone()
     if mask_inputs:
+        # Ignore the instruction tokens when computing the loss so the model is
+        # only supervised on the expected assistant reply.
         labels[:len(encoded_full_prompt)] = IGNORE_INDEX
 
     # import pdb; pdb.set_trace()

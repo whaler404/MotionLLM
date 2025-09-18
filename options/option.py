@@ -6,6 +6,8 @@ def get_args_parser():
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
     ## dataloader
+    # Prompt text that seeds instruction templates when no explicit CLI input is
+    # provided.
     parser.add_argument('--prompt', type=str, default="Generate a textual description corresponding to the given sequence of human motion tokens.", help='task description')
     parser.add_argument('--input', type=str, help='generation condictions')
     parser.add_argument('--dataname', type=str, default='t2m', help='dataset directory')
@@ -19,6 +21,8 @@ def get_args_parser():
 
 
     ## lora
+    # LoRA hyper-parameters controlling rank, scaling and dropout used in
+    # low-rank adaptation of the language model weights.
     parser.add_argument('--lora_r', type=int, default=64)
     parser.add_argument('--lora_alpha', type=int, default=16)
     parser.add_argument('--lora_dropout', type=float, default=0.05)
