@@ -23,6 +23,9 @@ def build_image_tower(image_tower_cfg, **kwargs):
 def build_video_tower(video_tower_cfg, **kwargs):
     video_tower = getattr(video_tower_cfg, 'mm_video_tower', getattr(video_tower_cfg, 'video_tower', None))
     if video_tower.endswith('LanguageBind_Video_merge'):
+        # LanguageBind's merged video tower returns a feature map shaped
+        # (batch, frames * patches, hidden) which is later projected into the
+        # language model width by the multimodal projector.
         return LanguageBindVideoTower(video_tower, args=video_tower_cfg, cache_dir='./cache_dir', **kwargs)
     raise ValueError(f'Unknown video tower: {video_tower}')
 

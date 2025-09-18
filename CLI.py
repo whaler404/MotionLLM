@@ -249,6 +249,9 @@ def main(
 
     X = ['Video']
 
+    # Build the multimodal encoder and preprocessing utilities that convert raw
+    # video frames into LanguageBind feature sequences before feeding them to the
+    # projection MLP.
     mm_backbone_mlp_model, processor = get_processor(X, args, 'cuda', pretrained_checkpoint_mlp, model_path = 'LanguageBind/Video-LLaVA-7B')
     video_processor = processor['video']
 
@@ -284,6 +287,8 @@ def main(
     while True:
 
         input_video_path = input("\033[0;34;40m Input video path: \033[0m")
+        # The processor handles frame sampling, resizing and normalization so the
+        # downstream towers always receive a tensor shaped (B, C, T, H, W).
         video_tensor = video_processor(input_video_path, return_tensors='pt')['pixel_values']
 
         if type(video_tensor) is list:
@@ -293,6 +298,8 @@ def main(
 
         X_modalities = [tensor,['video']]
 
+        # Encode the preprocessed frames and project them into the language model
+        # hidden size so they can be concatenated with text tokens.
         video_feature = mm_backbone_mlp_model.get_multimodal_embeddings(X_modalities)
 
         prompt = input("\033[0;34;40m Your question: \033[0m")
