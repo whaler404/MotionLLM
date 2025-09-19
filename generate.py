@@ -41,7 +41,11 @@ def generate(
         # import pdb; pdb.set_trace()
         T = idx[0].shape[-1] + idx[2].shape[-1] + len(idx[1])
         before_len = idx[0].shape[-1]
-        catted = torch.cat((idx[0], torch.zeros((1, len(idx[1]))).cuda(), idx[2]), dim=1).long()
+        padding_device = idx[0].device
+        catted = torch.cat(
+            (idx[0], torch.zeros((1, len(idx[1])), device=padding_device), idx[2]),
+            dim=1,
+        ).long()
         idx = (catted, idx[1], before_len)
         T_new = T + max_new_tokens
         # import pdb; pdb.set_trace()

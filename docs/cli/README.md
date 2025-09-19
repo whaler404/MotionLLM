@@ -17,8 +17,24 @@ litgpt download lmsys/vicuna-7b-v1.5
 
 litgpt convert_to_litgpt checkpoints/vicuna-7b-v1.5
 
-python CLI.py --lora_path ./checkpoints/MotionLLM-7B/motionllm-ckpt/lora.pth --mlp_path ./checkpoints/MotionLLM-7B/motionllm-ckpt/linear.pth
+python CLI.py --lora_path ./checkpoints/MotionLLM-7B/motionllm-ckpt/lora.pth --mlp_path ./checkpoints/MotionLLM-7B/motionllm-ckpt/linear.pth --device_map "llm=cuda:0,image=cuda:1,video=cuda:2,projector=cuda:3"
+
+python CLI_hf.py --mlp_path ./checkpoints/MotionLLM-7B/motionllm-ckpt/linear.pth --device_map "llm=cuda:0,image=cuda:1,video=cuda:2,projector=cuda:3"
 ```
+
+### 使用 Hugging Face 版本 CLI
+`CLI_hf.py` 基于 Hugging Face Transformers 加载 Vicuna-7B 及 LoRA 适配器，可直接复用同一套参数：
+
+```bash
+python CLI_hf.py \
+    --lora_path ./hf_adapters/video_qa_adapter \  # 需为 Hugging Face/PEFT 目录
+    --mlp_path ./finetuned_models/video_mlp_projector.pth \
+    --device_map "llm=0,video=1,projector=2"
+```
+
+- Vicuna-7B 基座将从 `checkpoints/vicuna-7b-v1.5/` 的 Hugging Face 权重加载。
+- `--lora_path` 需指向包含 `adapter_config.json` 的 PEFT LoRA 目录；若仍为 `.pth` 权重，请先转换为 Hugging Face 兼容格式。
+- 其他多模态塔与投影器的加载流程与原 CLI 一致，仍可使用 `--device_map` 精细控制显卡分配。
 
 ### 交互式界面
 启动后，CLI 会提供交互式界面：

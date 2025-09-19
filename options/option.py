@@ -1,5 +1,52 @@
 import argparse
 
+
+_DEVICE_ALIAS = {
+    'llm': 'llm',
+    'language_model': 'llm',
+    'language': 'llm',
+    'lm': 'llm',
+    'vision': 'image',
+    'image': 'image',
+    'image_tower': 'image',
+    'image_encoder': 'image',
+    'llava_image': 'image',
+    'video': 'video',
+    'video_tower': 'video',
+    'video_encoder': 'video',
+    'llava': 'video',
+    'llava_video': 'video',
+    'video_llava': 'video',
+    'projector': 'projector',
+    'projection': 'projector',
+    'mm_projector': 'projector',
+    'vision_projector': 'projector',
+}
+
+
+def _device_map_type(raw_value):
+    mappings = {}
+    entries = [chunk.strip() for chunk in raw_value.split(',') if chunk.strip()]
+    if not entries:
+        raise argparse.ArgumentTypeError('device_map must contain at least one mapping such as "llm=cuda:0".')
+
+    for entry in entries:
+        if '=' not in entry:
+            raise argparse.ArgumentTypeError(
+                f'Invalid device_map entry "{entry}". Expected format "component=device".'
+            )
+        key, value = entry.split('=', 1)
+        key = key.strip().lower()
+        value = value.strip()
+        if not key or not value:
+            raise argparse.ArgumentTypeError(
+                f'Invalid device_map entry "{entry}". Component and device must be non-empty.'
+            )
+        canonical_key = _DEVICE_ALIAS.get(key, key)
+        mappings[canonical_key] = value
+
+    return mappings
+
 def get_args_parser():
     parser = argparse.ArgumentParser(description='Optimal Transport AutoEncoder training for Amass',
                                      add_help=True,
@@ -81,6 +128,16 @@ def get_args_parser():
     parser.add_argument('--mm_projector_type', type=str, default='mlp2x_gelu', help='if use multimodal video tower')
     parser.add_argument('--mm_hidden_size', type=int, default=1024, help='if use multimodal video tower')
     parser.add_argument('--hidden_size', type=int, default=4096, help='if use multimodal video tower')
+    parser.add_argument('--llm_device', type=str, default='cuda:0', help='device used for loading the language model')
+    parser.add_argument('--image_tower_device', type=str, default=None, help='device used for the image tower, defaults to llm_device when not set')
+    parser.add_argument('--video_tower_device', type=str, default=None, help='device used for the video tower, defaults to llm_device when not set')
+    parser.add_argument('--projector_device', type=str, default=None, help='device used for the multimodal projector, defaults to llm_device when not set')
+    parser.add_argument(
+        '--device_map',
+        type=_device_map_type,
+        default=None,
+        help='Comma separated list mapping components to devices, e.g. "llm=cuda:0,video=cuda:1,projector=cuda:2".',
+    )
 
     # for mvbench save
     parser.add_argument('--model_type', type=str, default=None, help='if use multimodal video tower')

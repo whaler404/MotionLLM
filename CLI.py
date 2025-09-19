@@ -31,6 +31,21 @@ warnings.filterwarnings('ignore')
 args = option.get_args_parser()
 
 
+def _normalize_device_string(device_value):
+    if device_value is None:
+        return None
+    value = device_value.strip()
+    if not value:
+        return None
+    if value.isdigit():
+        return f"cuda:{value}"
+    if value.startswith('cuda') and ':' not in value and value != 'cuda':
+        suffix = value[len('cuda'):]
+        if suffix.isdigit():
+            return f"cuda:{suffix}"
+    return value
+
+
 class LlavaMetaModel:
 
     def __init__(self, config, pretrained_checkpoint):
@@ -127,15 +142,34 @@ class LlavaMetaModel:
 
             self.mm_projector.load_state_dict(get_w(mm_projector_weights, 'mm_projector'))
 
+    def configure_projector(self, device=None, dtype=None):
+        kwargs = {}
+        if device is not None:
+            kwargs["device"] = device
+        if dtype is not None:
+            kwargs["dtype"] = dtype
+        if kwargs:
+            self.mm_projector = self.mm_projector.to(**kwargs)
+        sample_param = next(self.mm_projector.parameters())
+        self.mm_projector_device = sample_param.device
+        self.mm_projector_dtype = sample_param.dtype
+
     def encode_images(self, images):
         image_features = self.get_image_tower()(images)
+        if self.mm_projector_device is not None and image_features.device != self.mm_projector_device:
+            image_features = image_features.to(self.mm_projector_device)
+        if self.mm_projector_dtype is not None and image_features.dtype != self.mm_projector_dtype:
+            image_features = image_features.to(dtype=self.mm_projector_dtype)
         image_features = self.mm_projector(image_features)
         return image_features
 
     def encode_videos(self, videos):
-        video_features = self.get_video_tower()(videos) # torch.Size([1, 2048, 1024])
-        video_features = self.mm_projector(video_features.float()) # torch.Size([1, 2048, 4096])
-
+        video_features = self.get_video_tower()(videos)
+        if self.mm_projector_device is not None and video_features.device != self.mm_projector_device:
+            video_features = video_features.to(self.mm_projector_device)
+        if self.mm_projector_dtype is not None and video_features.dtype != self.mm_projector_dtype:
+            video_features = video_features.to(dtype=self.mm_projector_dtype)
+        video_features = self.mm_projector(video_features)
         return video_features
     
     def get_multimodal_embeddings(self, X_modalities):
@@ -144,19 +178,27 @@ class LlavaMetaModel:
 
         return X_features
     
-def get_processor(X, config, device, pretrained_checkpoint_tower, model_path = 'LanguageBind/Video-LLaVA-7B'):
-
-
+def get_processor(
+    X,
+    config,
+    devices,
+    pretrained_checkpoint_tower,
+    dtype,
+    model_path='LanguageBind/Video-LLaVA-7B',
+):
     processor = {}
 
     mm_backbone_mlp_model = LlavaMetaModel(config, pretrained_checkpoint_tower)
+    projector_device = devices.get('projector')
+    mm_backbone_mlp_model.configure_projector(device=projector_device, dtype=dtype)
 
     print(X)    
     if 'Image' in X:
         image_tower = mm_backbone_mlp_model.get_image_tower() # LanguageBindImageTower()
         if not image_tower.is_loaded:
             image_tower.load_model()
-        image_tower.to(device=device, dtype=torch.float16)
+        image_device = devices.get('image')
+        image_tower.to(device=image_device, dtype=dtype)
         image_processor = image_tower.image_processor
         processor['image'] = image_processor
 
@@ -164,7 +206,8 @@ def get_processor(X, config, device, pretrained_checkpoint_tower, model_path = '
         video_tower = mm_backbone_mlp_model.get_video_tower()
         if not video_tower.is_loaded:
             video_tower.load_model()
-        video_tower.to(device=device, dtype=torch.float16)
+        video_device = devices.get('video')
+        video_tower.to(device=video_device, dtype=dtype)
         video_processor = video_tower.video_processor
         processor['video'] = video_processor
 
@@ -212,7 +255,34 @@ def main(
     if quantize is not None:
         raise NotImplementedError("Quantization in LoRA is not supported yet")
 
-    fabric = L.Fabric(accelerator=accelerator, devices=1)
+    device_overrides = args.device_map or {}
+    llm_device_str = _normalize_device_string(device_overrides.get('llm', args.llm_device))
+    if llm_device_str is None:
+        raise ValueError('llm device must be specified either via --llm_device or --device_map.')
+    llm_device = torch.device(llm_device_str)
+
+    def _resolve_device(candidate, fallback):
+        normalized = _normalize_device_string(candidate)
+        if normalized is None:
+            return fallback
+        return torch.device(normalized)
+
+    device_map = {
+        'llm': llm_device,
+        'image': _resolve_device(device_overrides.get('image', args.image_tower_device), llm_device),
+        'video': _resolve_device(device_overrides.get('video', args.video_tower_device), llm_device),
+        'projector': _resolve_device(device_overrides.get('projector', args.projector_device), llm_device),
+    }
+
+    print('Resolved device map:', {k: str(v) for k, v in device_map.items()})
+
+    fabric_accelerator = accelerator if accelerator != "auto" else ("cuda" if llm_device.type == "cuda" else llm_device.type)
+    fabric_devices = 1
+    if llm_device.type == "cuda" and llm_device.index is not None:
+        fabric_devices = [llm_device.index]
+        fabric_accelerator = "cuda"
+
+    fabric = L.Fabric(accelerator=fabric_accelerator, devices=fabric_devices)
 
     dt = getattr(torch, dtype, None)
     if not isinstance(dt, torch.dtype):
@@ -221,7 +291,7 @@ def main(
 
     t0 = time.time()
     with EmptyInitOnDevice(
-        device=fabric.device, dtype=dtype, quantization_mode=quantize
+        device=llm_device, dtype=dtype, quantization_mode=quantize
     ), lora(r=args.lora_r, alpha=args.lora_alpha, dropout=args.lora_dropout, enabled=True):
         checkpoint_dir = Path("checkpoints/vicuna-7b-v1.5")
         lora_query = True
@@ -242,7 +312,7 @@ def main(
             to_mlp=lora_mlp,
             to_head=lora_head,
         )
-        model = GPT(config).bfloat16()
+        model = GPT(config).to(dtype=dtype)
     
     mlp_path = args.mlp_path
     pretrained_checkpoint_mlp = torch.load(mlp_path)
@@ -252,7 +322,14 @@ def main(
     # Build the multimodal encoder and preprocessing utilities that convert raw
     # video frames into LanguageBind feature sequences before feeding them to the
     # projection MLP.
-    mm_backbone_mlp_model, processor = get_processor(X, args, 'cuda', pretrained_checkpoint_mlp, model_path = 'LanguageBind/Video-LLaVA-7B')
+    mm_backbone_mlp_model, processor = get_processor(
+        X,
+        args,
+        device_map,
+        pretrained_checkpoint_mlp,
+        dtype,
+        model_path='LanguageBind/Video-LLaVA-7B',
+    )
     video_processor = processor['video']
 
     linear_proj = mm_backbone_mlp_model.mm_projector
@@ -269,7 +346,7 @@ def main(
 
     # load mlp again, to en sure, not neccessary actually 
     linear_proj.load_state_dict(pretrained_checkpoint_mlp)
-    linear_proj = linear_proj.cuda()
+    linear_proj = linear_proj.to(device=device_map['projector'], dtype=dtype)
     print('Load mlp model again from', mlp_path)
 
 
@@ -284,6 +361,8 @@ def main(
     print('Load tokenizer from', tokenizer_llm_path)
 
 
+    video_device = device_map['video']
+
     while True:
 
         input_video_path = input("\033[0;34;40m Input video path: \033[0m")
@@ -292,24 +371,32 @@ def main(
         video_tensor = video_processor(input_video_path, return_tensors='pt')['pixel_values']
 
         if type(video_tensor) is list:
-            tensor = [video.to('cuda', dtype=torch.float16) for video in video_tensor]
+            tensor = [video.to(video_device, dtype=dtype) for video in video_tensor]
         else:
-            tensor = video_tensor.to('cuda', dtype=torch.float16) # (1,3,8,224,224)
+            tensor = video_tensor.to(video_device, dtype=dtype)
 
         X_modalities = [tensor,['video']]
 
         # Encode the preprocessed frames and project them into the language model
         # hidden size so they can be concatenated with text tokens.
         video_feature = mm_backbone_mlp_model.get_multimodal_embeddings(X_modalities)
+        video_feature = video_feature.to(llm_device, dtype=dtype)
 
         prompt = input("\033[0;34;40m Your question: \033[0m")
         sample = {"instruction": prompt, "input": input_video_path}
         
         prefix = generate_prompt_mlp(sample)
-        pre = torch.cat((tokenizer.encode(prefix.split('INPUT_VIDEO: ')[0] + "\n", bos=True, eos=False, device=model.device).view(1, -1), tokenizer.encode("INPUT_VIDEO: ", bos=False, eos=False, device=model.device).view(1, -1)), dim=1)
+        pre = torch.cat((
+            tokenizer.encode(prefix.split('INPUT_VIDEO: ')[0] + "\n", bos=True, eos=False, device=llm_device).view(1, -1),
+            tokenizer.encode("INPUT_VIDEO: ", bos=False, eos=False, device=llm_device).view(1, -1)
+        ), dim=1)
 
         prompt = (pre, ". ASSISTANT: ")
-        encoded = (prompt[0], video_feature[0], tokenizer.encode(prompt[1], bos=False, eos=False, device=model.device).view(1, -1))
+        encoded = (
+            prompt[0],
+            video_feature[0],
+            tokenizer.encode(prompt[1], bos=False, eos=False, device=llm_device).view(1, -1)
+        )
 
         
         t0 = time.perf_counter()
