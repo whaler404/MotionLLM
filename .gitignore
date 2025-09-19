@@ -1,2 +1,8 @@
 .claude
 .venv
+.cache
+checkpoints
+cache_dir
+
+# python
+__pycache__/

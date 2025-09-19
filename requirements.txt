@@ -43,3 +43,4 @@ trimesh==3.22.1
 typing_extensions==4.12.0
 uvicorn==0.30.0
 visualize==0.5.1
+uv

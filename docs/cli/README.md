@@ -12,11 +12,17 @@
 python CLI.py \
     --lora_path ./finetuned_models/video_qa_lora.pth \
     --mlp_path ./finetuned_models/video_mlp_projector.pth
+
+litgpt download lmsys/vicuna-7b-v1.5
+
+litgpt convert_to_litgpt checkpoints/vicuna-7b-v1.5
+
+python CLI.py --lora_path ./checkpoints/MotionLLM-7B/motionllm-ckpt/lora.pth --mlp_path ./checkpoints/MotionLLM-7B/motionllm-ckpt/linear.pth
 ```
 
 ### 交互式界面
 启动后，CLI 会提供交互式界面：
-```bash
+```bashli
 Input video path: ./examples/sample_video.mp4
 Your question: 视频中的人在做什么？
 ================================

@@ -193,7 +193,7 @@ class ProjectionNN(nn.Module):
 
 def main(
     quantize: Optional[str] = None,
-    dtype: str = "float32",
+    dtype: str = "bfloat16",
     max_new_tokens: int = 200,
     top_k: int = 200,
     temperature: float = 0.8,
