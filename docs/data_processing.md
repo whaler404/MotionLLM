@@ -1,52 +1,25 @@
-# 数据处理流程说明
+# 数据处理
 
-## 总览
-MotionLLM 的视频指令数据由 `scripts/video_dataset/prepare_video_dataset_intern_video.py` 与 `prepare_video_dataset_video_llava.py` 负责转换为模型可直接使用的 PyTorch 序列文件。流程包括：
+## 指令数据转换流程
+1. 从 `/comp_robot/.../video_llava_{split}.json` 等路径加载包含 `instruction`、可选 `input` 以及 `output` 字段的原始 JSON（`scripts/video_dataset/prepare_video_dataset_video_llava.py:23-60`）。
+2. 使用 `generate_prompt_mlp` 生成对话式提示模版；当存在视频路径时会插入 `INPUT_VIDEO` 字段（`scripts/video_dataset/prepare_video_dataset_video_llava.py:124-138`）。
+3. 采用 LLaMA 分词器对提示及“提示+回答”进行编码，截断至 `max_seq_length`，并在完整响应后追加 EOS（`scripts/video_dataset/prepare_video_dataset_video_llava.py:85-111`）。
+4. 将提示部分的标签位设置为 `IGNORE_INDEX=-1`，确保监督损失仅覆盖助手响应（`scripts/video_dataset/prepare_video_dataset_video_llava.py:103-108`）。
+5. 将处理后的样本保存为 `.pt` 文件，方便后续微调快速加载；InternVideo 数据脚本遵循相同格式（`scripts/video_dataset/prepare_video_dataset_video_llava.py:58-60`、`scripts/video_dataset/prepare_video_dataset_intern_video.py:58-60`）。
 
-1. 读取原始 JSON 指令、视频路径与回答文本。`json.load` 的结果会被立即转成列表，以保证后续长度统计和迭代顺序的一致性。【F:scripts/video_dataset/prepare_video_dataset_intern_video.py†L43-L47】【F:scripts/video_dataset/prepare_video_dataset_video_llava.py†L43-L47】
-2. 遍历样本并构造统一的 prompt，拼接回答后送入分词器得到 `input_ids` 和 `labels`。【F:scripts/video_dataset/prepare_video_dataset_intern_video.py†L85-L111】【F:scripts/video_dataset/prepare_video_dataset_video_llava.py†L85-L111】
-3. 可选地将 prompt 对应的标签位置填入 `IGNORE_INDEX=-1`，使得训练只在回答部分计算损失。【F:scripts/video_dataset/prepare_video_dataset_intern_video.py†L102-L107】【F:scripts/video_dataset/prepare_video_dataset_video_llava.py†L102-L107】
-4. 将处理后的样本列表保存为 `.pt` 文件，供后续训练/推理直接加载。【F:scripts/video_dataset/prepare_video_dataset_intern_video.py†L58-L61】【F:scripts/video_dataset/prepare_video_dataset_video_llava.py†L58-L61】
+## 提示模板
+- 训练与推理阶段共用同一对话模板，保证标注与运行时的输入保持一致（`scripts/video_dataset/prepare_video_dataset_video_llava.py:124-160`、`app.py:324-328`、`CLI.py:308-312`）。
+- 当需要系统提示时，可通过 `generate_system_command` 注入统一的系统消息（`scripts/video_dataset/prepare_video_dataset_video_llava.py:169-172`）。
 
-## 输入输出格式示例
-原始 JSON 中的单个样本大致形如：
+## 推理阶段的模态预处理
+- `get_processor` 会根据配置加载 LanguageBind 图像/视频塔及其预处理器，并将权重迁移到 CUDA FP16 模式（`app.py:277-296`、`CLI.py:147-256`）。
+- 视频输入经采样、缩放与归一化后，转换为 `(B, C, T, H, W)` 的张量，再送入对应的塔编码（`app.py:310-318`、`CLI.py:289-304`）。
+- 编码得到的特征网格会通过多模态投影器映射到 Vicuna 隐层宽度，以便与文本 token 拼接后送入解码器（`app.py:317-335`、`CLI.py:299-326`）。
 
-```json
-{
-  "instruction": "Describe the motion in the clip",
-  "input": "video_samples/sample_0001.mp4",
-  "output": "The person waves and then sits down."
-}
-```
+## 动作（Motion）token 管线
+- 可选的动作分支使用 VQ-VAE 对动作序列进行离散化。输入先维度置换为 `(batch, channels, timesteps)`，经编码、量化后再解码重建（`models/vqvae.py:37-92`）。
+- 不同数据集（如 `t2m`、`kit`）会调整编码器/解码器的输入维度与关节数量（`models/vqvae.py:25-34`、`models/vqvae.py:112-124`）。
+- 通过 `args.quantizer` 选择 EMA、重置等量化策略，`Quantize*` 模块提供不同的更新方式（`models/vqvae.py:24-34`、`options/option.py:60-62`）。
 
-经过 `prepare_sample` 后会得到包含以下关键字段的字典：
-
-```python
-{
-  "instruction": "Describe the motion in the clip",
-  "input": "video_samples/sample_0001.mp4",
-  "output": "The person waves and then sits down.",
-  "sys_command": "A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user's questions. ",
-  "input_ids_no_response": tensor([1, 892, 298, ...]),
-  "input_ids": tensor([1, 892, 298, ..., 29871, 13]),
-  "labels": tensor([-1, -1, -1, ..., 29871, 13])
-}
-```
-其中：
-- `input_ids_no_response` 仅包含用户指令部分，构造方式见 `tokenize(tokenizer, full_prompt, eos=False)`。【F:scripts/video_dataset/prepare_video_dataset_intern_video.py†L90-L91】
-- `input_ids` 在末尾追加了回答文本，并在调用 `tokenize(..., eos=True)` 时自动附加 `<eos>` 标记。【F:scripts/video_dataset/prepare_video_dataset_intern_video.py†L85-L92】
-- 当 `mask_inputs=True` 时，`labels` 前半段会被填为 `-1` 以忽略用户 prompt。【F:scripts/video_dataset/prepare_video_dataset_intern_video.py†L102-L107】
-
-## Prompt 模板
-两个脚本都复用了 `generate_prompt_mlp`，当样本包含 `input`（视频路径或描述）时，会生成类似：
-
-```
-A chat between a curious user and an artificial intelligence assistant, paired with an input that provides further context. The assistant gives helpful, detailed, and polite answers to the user's questions. USER: Describe the motion in the clip INPUT_VIDEO: video_samples/sample_0001.mp4.
-ASSISTANT:
-```
-【F:scripts/video_dataset/prepare_video_dataset_intern_video.py†L124-L138】
-
-若无输入，则省略 `INPUT_VIDEO` 字段，直接接在 `ASSISTANT:` 后等待模型生成。【F:scripts/video_dataset/prepare_video_dataset_intern_video.py†L136-L138】
-
-## 数据质量控制
-`prepare` 会针对不同的 `split`（例如 `train_intern_human_2M_stage1_caption` 或 `video_llava_train`）生成对应的 `.pt` 文件，方便后续在不同子任务之间切换。【F:scripts/video_dataset/prepare_video_dataset_intern_video.py†L152-L157】【F:scripts/video_dataset/prepare_video_dataset_video_llava.py†L175-L180】
+## 持久化内容
+- 每个样本保存 `input_ids`、`input_ids_no_response`、`labels` 与可选 `sys_command`，以便训练期间恢复完整上下文与监督目标（`scripts/video_dataset/prepare_video_dataset_video_llava.py:111-112`）。

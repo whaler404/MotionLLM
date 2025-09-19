@@ -1,30 +1,34 @@
-# 配置系统说明
+# 配置指南
 
-MotionLLM 的命令行参数集中在 `options/option.py`，使用 `argparse` 定义训练、推理与多模态组件的超参数集合。【F:options/option.py†L3-L88】
+## 前置条件
+- 将 Vicuna 1.5 7B 权重和分词器下载到 `./checkpoints/vicuna-7b-v1.5/`。Gradio 与 CLI 入口会先加载基础的 `lit_model.pth` 与分词器，然后再合并 LoRA 权重（参考 `app.py:488-563`、`CLI.py:204-283`）。
+- 通过 `--lora_path` 与 `--mlp_path` 指定 LoRA 检查点以及多模态投影 MLP。两者都需要指向微调阶段生成的 `*.pth` 文件（`app.py:488-555`、`CLI.py:204-274`）。
+- 可选：设置 `GRADIO_TEMP_DIR` 以指定临时目录，避免将上传内容存放在系统默认的 `/tmp`（`README.md:110-124`）。
 
-## 数据与路径参数
-- `--prompt`：默认任务描述，用于构造指令模板时的初始文案。【F:options/option.py†L8-L16】
-- `--vqvae_pth`、`--lora_path`、`--mlp_path` 等路径参数用于加载预训练 VQ-VAE、LoRA 适配器与多模态投影器权重。【F:options/option.py†L15-L20】
-- `--data_dir` 设定预处理数据所在目录，以便 `prepare` 与训练脚本统一读取。【F:options/option.py†L15-L20】
+## 命令行参数
 
-## LoRA 与语言模型设置
-- `--lora_r`、`--lora_alpha`、`--lora_dropout` 控制低秩适配层的秩、缩放及 dropout 概率，文件中增加的注释强调了它们和语言模型微调的关系。【F:options/option.py†L23-L28】
-- `--block_size` 指定语言模型的上下文窗口长度，以保证与数据处理中 `max_seq_length` 的兼容性。【F:options/option.py†L30-L31】
+### 数据与检查点
+- `--dataname`、`--data_dir` 与 `--out_dir` 指定数据集根目录及输出路径（`options/option.py:11-20`）。
+- `--vqvae_pth`、`--resume_pth`、`--motion_vq_token_path`、`--motionx_zero_shot_path` 在启用动作分支时提供 VQ-VAE 及零样本评测的相关权重与资源（`options/option.py:16-20`、`options/option.py:65-71`）。
 
-## 训练超参数
-- `--batch_size`、`--micro_batch_size`、`--weight_decay`、`--warmup_steps` 等参数用于控制优化器与调度器的行为。【F:options/option.py†L33-L44】
-- `--learning_rate_lora` 与 `--learning_rate_mlp` 分别作用于语言模型 LoRA 层与投影 MLP，允许差异化学习率策略。【F:options/option.py†L33-L39】
+### LoRA 与 LLM 适配
+- `--lora_path`、`--lora_r`、`--lora_alpha`、`--lora_dropout` 控制低秩适配器位置与超参数。默认只训练注意力的 query/value 投影（`options/option.py:18-28`、`app.py:512-528`、`CLI.py:227-243`）。
+- `--block_size` 设置文本上下文的最大长度（`options/option.py:30-31`）。
 
-## VQ-VAE 与量化设置
-- 代码包含 VQ-VAE 的结构超参，如 `--code_dim`、`--down_t`、`--depth` 等，支持在不同分辨率与码本配置间切换。【F:options/option.py†L46-L58】
-- `--quantizer` 及 `--quantbeta` 控制码本更新策略，适配不同的量化变体。【F:options/option.py†L60-L62】
+### 训练调度
+- `--batch_size`、`--micro_batch_size`、`--learning_rate_lora`、`--learning_rate_mlp`、`--weight_decay`、`--warmup_steps`、`--eval_interval`、`--save_interval`、`--eval_iters`、`--log_interval` 决定优化器、学习率及日志频率（`options/option.py:33-44`）。
 
-## 可视化与扩展标志
-- `--render` 与 `--motion_vq_token_path` 用于驱动 SMPL 渲染或载入离线离散化后的动作 token。【F:options/option.py†L64-L66】
-- `--projectionnn`、`--diverse`、`--vinilla` 等标志打开特定的推理模式，如使用多层感知机投影或多样化描述。【F:options/option.py†L72-L74】
+### VQ-VAE 动作编码
+- `--code_dim`、`--nb_code`、`--mu`、`--down_t`、`--stride_t`、`--width`、`--depth`、`--dilation_growth_rate`、`--output_emb_width`、`--vq_act`、`--seed`、`--window_size` 控制 VQ-VAE 结构（`options/option.py:46-58`）。
+- `--quantizer` 与 `--quantbeta` 用于切换量化器类型（`options/option.py:60-62`）。
 
-## 多模态塔配置
-- `--image_tower` 与 `--video_tower` 决定使用的感知骨干，默认接入 LanguageBind 的图像/视频编码器。【F:options/option.py†L77-L83】
-- `--mm_projector_type`、`--mm_hidden_size`、`--hidden_size` 控制视觉特征如何映射到语言模型的隐藏维度，与多模态投影器构造直接相关。【F:options/option.py†L77-L83】
+### 多模态塔与投影层
+- `--image_tower`、`--video_tower`、`--mm_vision_select_layer`、`--mm_projector_type`、`--mm_hidden_size`、`--hidden_size` 配置 LanguageBind 编码器及映射到 Vicuna 隐层宽度的投影模块（`options/option.py:77-83`、`models/multimodal_projector/builder.py:235-247`）。默认 `mlp2x_gelu` 为两层线性层加 GELU。
 
-以上参数在运行 `CLI.py` 或数据处理脚本时通过 `option.get_args_parser()` 统一加载，保证配置的一致性。【F:CLI.py†L31-L32】
+### 其他参数
+- `--projectionnn`、`--diverse`、`--vinilla` 打开额外的生成策略或可视化分支（`options/option.py:72-74`）。
+- `--model_type` 用于在保存或评测时标记模型类型（`options/option.py:85-86`）。
+
+## 环境提示
+- 无法直接访问 Hugging Face 时，可使用镜像：`HF_ENDPOINT=https://hf-mirror.com`（`README.md:118-121`）。
+- 若在多卡环境运行，可通过 `CUDA_VISIBLE_DEVICES` 设定设备编号；代码假定存在可用的 CUDA 设备（`app.py:480`、`CLI.py:255-304`）。

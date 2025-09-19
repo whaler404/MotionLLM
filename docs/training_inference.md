@@ -1,27 +1,31 @@
-# 训练与推理流水线
+# 训练与推理
 
-## 数据准备阶段
-1. 调用 `scripts/video_dataset/prepare_*.py`，将原始 JSON 样本转成 `input_ids`、`labels` 等张量并保存为 `.pt` 文件。【F:scripts/video_dataset/prepare_video_dataset_intern_video.py†L23-L111】【F:scripts/video_dataset/prepare_video_dataset_video_llava.py†L23-L111】
-2. 标签前缀被置为 `IGNORE_INDEX`，训练时只回传回答部分的梯度，避免模型“抄题”。【F:scripts/video_dataset/prepare_video_dataset_intern_video.py†L102-L107】
+## LoRA + 投影器训练流程
+1. **数据准备**：使用提供的脚本将指令/回答 JSON 转换为张量，统一采用带有 `INPUT_VIDEO` 的对话模版，并用 `IGNORE_INDEX` 屏蔽提示部分（`scripts/video_dataset/prepare_video_dataset_video_llava.py:23-176`）。
+2. **主干初始化**：从 Vicuna 7B 权重启动模型，并借助 `lit_llama.lora` 仅解冻需要训练的 Query/Value 投影（`app.py:508-528`、`CLI.py:224-243`）。
+3. **多模态投影训练**：加载并冻结 LanguageBind 视觉塔，仅训练 `mm_projector` 与 LoRA 适配器，使视觉特征能够对齐 Vicuna 隐层（`app.py:537-555`、`models/multimodal_projector/builder.py:235-247`）。
+4. **优化超参**：通过 `--learning_rate_lora` 与 `--learning_rate_mlp` 为 LoRA 和 MLP 设置独立学习率；其他批次、Warmup、日志频率等由 `options/option.py` 中的参数控制（`options/option.py:33-44`）。
+5. **可选动作分支**：在需要动作文本联合建模时，实例化 VQ-VAE 及相关编码器，量化动作 Token 并联合训练描述头（`models/vqvae.py:7-134`、`models/modules.py:1-74`）。
 
-## 配置加载
-- `option.get_args_parser()` 在 `CLI.py` 启动时立即解析所有路径与超参数，保证训练、推理脚本使用一致配置。【F:CLI.py†L31-L32】
-- 其中包含 LoRA、VQ-VAE、多模态塔等模块的关键超参，详见《配置系统说明》。【F:options/option.py†L8-L88】
+## 评估工具
+- `models/evaluator_wrapper.py` 会加载预训练的文本/动作编码器，用于计算嵌入相似度，支持检索式指标或动作文本对齐评估（`models/evaluator_wrapper.py:1-120`）。
+- 通过 `--motionx_zero_shot_path` 等参数可以指定零样本评测集，复现论文中的 MotionX 评估（`options/option.py:69-70`）。
 
-## 模型与权重初始化
-1. 通过 `EmptyInitOnDevice` 与 `lora(...)` 上下文构建 Vicuna 基座，并启用 LoRA 低秩适配结构。【F:CLI.py†L222-L245】
-2. 加载三类权重：Vicuna 预训练模型、LoRA 增量权重以及视觉投影器（MLP），随后将其合并。【F:CLI.py†L260-L273】
-3. `get_processor` 根据配置创建 LanguageBind 感知塔和对应的预处理器，用于在 GPU 上提取视频特征。【F:CLI.py†L147-L170】
+## 推理流程
 
-## 推理 Pipeline
-1. 用户提供视频路径后，`video_processor` 完成采样与归一化，输出 `(B, C, T, H, W)` 的张量。【F:CLI.py†L289-L297】
-2. `LlavaMetaModel` 将视频张量编码为 `(B, N, 1024)`，再经 `mm_projector` 投影到语言模型维度 `(B, N, 4096)`。【F:CLI.py†L135-L145】
-3. 根据用户问题构造文本 prompt，并与视觉特征一起组织成 `generate` 所需的元组输入。【F:CLI.py†L305-L326】
-4. `generate` 函数逐 token 采样，支持温度与 top-k 调节；当采样到 `<eos>` 或达到最大步数时终止。【F:generate.py†L14-L108】
-5. 最终输出经过 tokenizer 解码并展示给用户。【F:CLI.py†L327-L331】
+### CLI 模式
+1. 加载基础 Vicuna 权重、合并 LoRA，并恢复投影器检查点（`CLI.py:204-274`）。
+2. 实例化 LanguageBind 视频处理器，将输入视频转为归一化后的张量（`CLI.py:255-304`）。
+3. 编码视频帧并通过投影器映射到 Vicuna 宽度，再与分词后的提示前缀/后缀拼接（`CLI.py:299-326`）。
+4. 调用自回归生成函数，输入包含文本 token 与视频特征的元组，最终解析出助手回答（`CLI.py:317-331`、`generate.py:40-108`）。
 
-## 训练思路
-虽然仓库中未包含完整的训练脚本，但利用生成的 `.pt` 数据与 LoRA 配置，可复用 `lit_gpt` 的训练循环：
-1. 构建 `DataLoader` 读取 `.pt` 样本，使用 `input_ids` 与 `labels` 进行监督微调。
-2. 只对 LoRA 参数和多模态投影器求梯度，保证基础模型稳定。【F:CLI.py†L222-L273】
-3. 在评估阶段复用上述推理流水线，检验模型对视频问题的回答质量。
+### Gradio 演示
+- 与 CLI 设置一致，但采用 Gradio Blocks 进行人机交互，并在上传、缓存及反馈记录（点赞/差评）等环节做了封装（`app.py:277-620`）。
+- 支持通过环境变量设置临时目录以及 Hugging Face 镜像，方便在受限网络环境中运行（`README.md:110-124`）。
+
+## 运维提示
+- 代码假定存在可用的 CUDA 设备，Lightning Fabric 会将模型转换为 BF16/FP16 以提升效率（`app.py:496-559`、`generate.py:146-160`）。
+- 在推理时必须保证提示中提供的文件路径有效，否则 LanguageBind 处理器在读取帧时会失败（`CLI.py:289-296`、`app.py:310-318`）。
+
+## 后续建议
+- 若需要复现实验，可在仓库中加入完整的训练脚本或 Notebook，将上述流程自动化。
